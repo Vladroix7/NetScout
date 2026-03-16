@@ -44,9 +44,9 @@ namespace NetScoutServer
             {
                 _running = true;
                 _listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-                _listener.Bind(new IPEndPoint(IPAddress.Parse("127.0.0.1"), 11111));
+                _listener.Bind(new IPEndPoint(IPAddress.Any, 11111));
                 _listener.Listen(10);
-                Log("✅ Server started on 127.0.0.1:11111");
+                Log("✅ Server started on 0.0.0.0:11111 (accepting all connections)");
 
                 while (_running)
                 {
@@ -74,7 +74,14 @@ namespace NetScoutServer
                 string data = Encoding.UTF8.GetString(buf, 0, n).Trim();
                 string[] parts = data.Split('|');
 
-                Log($"📨 {data}");
+                // Log safely — hide passwords from admin log
+                string safeLog = parts[0] switch
+                {
+                    "LOGIN"    => $"LOGIN|{parts[1]}|[HASH HIDDEN]",
+                    "REGISTER" => $"REGISTER|{parts[1]}|[HASH HIDDEN]|{(parts.Length > 3 ? parts[3] : "")}",
+                    _          => data
+                };
+                Log($"📨 {safeLog}");
 
                 string response = parts[0] switch
                 {
