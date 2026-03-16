@@ -1,0 +1,15 @@
+# Build output
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+
+# NuGet packages
+packages/
+*.nupkg
+
+# OS
+Thumbs.db
+desktop.ini
