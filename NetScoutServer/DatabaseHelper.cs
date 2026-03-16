@@ -8,7 +8,7 @@ namespace NetScoutServer
 {
     public class DatabaseHelper
     {
-        private string connectionString = "Server=localhost;Port=3306;Database=netscout;Uid=root;Pwd=123456;";
+        private readonly string connectionString = "Server=localhost;Port=3306;Database=netscout;Uid=root;Pwd=123456;Allow User Variables=true;";
 
         // ─────────────────────────────────────────────
         //  CONNECTION
@@ -94,12 +94,13 @@ namespace NetScoutServer
 
         public bool EmailExists(string email)
         {
+            if (string.IsNullOrWhiteSpace(email)) return false;
             try
             {
                 using var conn = new MySqlConnection(connectionString);
                 conn.Open();
                 using var cmd = new MySqlCommand("SELECT COUNT(*) FROM Users WHERE Email = @e", conn);
-                cmd.Parameters.AddWithValue("@e", email);
+                cmd.Parameters.AddWithValue("@e", email.ToLower().Trim());
                 return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
             }
             catch { return false; }
