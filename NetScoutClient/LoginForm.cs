@@ -30,9 +30,9 @@ namespace NetScoutClient
             string email = txtEmail.Text.Trim();
             string password = txtPassword.Text;
 
-            if (string.IsNullOrEmpty(email))
+            if (string.IsNullOrEmpty(email) || !email.Contains("@") || !email.Contains("."))
             {
-                MessageBox.Show("Please enter your email address", "Error",
+                MessageBox.Show("Please enter a valid email address (e.g. user@example.com)", "Invalid Email",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 txtEmail.Focus();
                 return;
