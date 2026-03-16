@@ -4,6 +4,22 @@ A lightweight network security scanner and monitoring tool built with **C# .NET 
 
 ---
 
+## 📸 Screenshots
+
+### Server — Admin Login
+![Admin Login](screenshots/admin-login.png)
+
+### Server — Admin Dashboard
+![Admin Dashboard](screenshots/admin-dashboard.png)
+
+### Client — User Login
+![Client Login](screenshots/client-login.png)
+
+### Client — Scanner Dashboard
+![Scanner Dashboard](screenshots/client-dashboard.png)
+
+---
+
 ## 📸 Overview
 
 NetScout is split into two applications:
