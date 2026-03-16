@@ -134,6 +134,7 @@ namespace NetScoutClient
         {
             ApplyServerIP();
             RegisterForm registerForm = new RegisterForm();
+            registerForm.FormClosed += (s, args) => this.Show();
             registerForm.Show();
             this.Hide();
         }
