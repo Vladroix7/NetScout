@@ -54,8 +54,10 @@ namespace NetScoutServer
 
         private void EnsureDefaultAdmin()
         {
-            _db.RegisterUser("admin@netscout.com", "admin123", "Admin");
+            // Only create if not already in DB — RegisterUser checks for duplicates
+            bool created = _db.RegisterUser("admin@netscout.com", "admin123", "Admin");
             _db.SetAdminStatus("admin@netscout.com", true);
+            if (created) Log("✅ Default admin account created");
         }
 
         private void StartServer()
@@ -217,6 +219,7 @@ namespace NetScoutServer
         {
             lstOnline.Items.Clear();
             lblOnlineCount.Text = "Online: 0";
+            this.Text = "NetScout — Admin Server v1.0";
             Log("🧹 Online list cleared");
         }
 
