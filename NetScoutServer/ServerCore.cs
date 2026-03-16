@@ -15,6 +15,7 @@ namespace NetScoutServer
 
         private readonly List<ConnectedUser> _sessionLogins = new();
         private readonly object _lock = new();
+        private int _totalConnections = 0;
 
         public event Action<string> OnLog;
         public event Action<ConnectedUser> OnUserLoggedIn;
@@ -53,7 +54,8 @@ namespace NetScoutServer
                     try
                     {
                         var client = _listener.Accept();
-                        Log($"🔌 New connection from {client.RemoteEndPoint}");
+                        int connId = System.Threading.Interlocked.Increment(ref _totalConnections);
+                        Log($"🔌 [{connId}] New connection from {client.RemoteEndPoint}");
                         new Thread(() => HandleClient(client)) { IsBackground = true }.Start();
                     }
                     catch (SocketException) when (!_running) { break; }
