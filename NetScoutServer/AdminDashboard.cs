@@ -78,6 +78,7 @@ namespace NetScoutServer
 
             lstOnline.Items.Insert(0, user.ToString());
             lblOnlineCount.Text = $"Online: {lstOnline.Items.Count}";
+            this.Text = $"NetScout — Admin Server v1.0  [{lstOnline.Items.Count} online]";
 
             // Refresh grid so LastLogin column updates
             LoadUsers();
