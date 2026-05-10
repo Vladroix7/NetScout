@@ -1,0 +1,227 @@
+================================================================================
+              NETSCOUT — CODE WALKTHROUGH (BEFORE / DURING / AFTER)
+================================================================================
+Format for each code block:
+  [BEFORE]  — what must exist / happen before this code runs
+  [DOES]    — what this code is doing right now, line by line
+  [AFTER]   — what changed / what comes next after this runs
+================================================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE: Config.cs (NetScoutClient)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+public static string HashPassword(string password)
+{
+    using var sha256 = SHA256.Create();
+    var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
+    return Convert.ToHexString(bytes).ToLower();
+}
+
+[BEFORE]  User typed a password in the login or register form
+[DOES]
+  1. Creates a SHA-256 hashing engine
+  2. Converts the password string to raw bytes (UTF-8)
+  3. Runs SHA-256 algorithm on the bytes → produces 32 bytes
+  4. Converts those 32 bytes to a hex string (e.g. "240be518fa...")
+  5. Returns it lowercase
+[AFTER]   The returned hash is put into the TCP message instead of the real password
+          Real password is NEVER stored or sent anywhere
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE: LoginForm.cs (NetScoutClient)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+private async void btnLogin_Click(object sender, EventArgs e)
+{
+    string email    = txtEmail.Text.Trim();
+    string password = Config.HashPassword(txtPassword.Text);
+    string message  = $"LOGIN|{email}|{password}";
+
+    using var client = new TcpClient();
+    await client.ConnectAsync(Config.ServerIP, Config.ServerPort);
+    // ... send message, read response ...
+    string[] parts = response.Split('|');
+    if (parts[0] == "SUCCESS") { ... open MainDashboard ... }
+    else { MessageBox.Show(parts[1]); }
+}
+
+[BEFORE]  User filled in email + password, clicked Login button
+          Server (NetScoutServer) must be running on port 11111
+[DOES]
+  1. Reads email from textbox, trims spaces
+  2. Hashes the password with SHA-256
+  3. Builds the message string "LOGIN|email|hash"
+  4. Opens a TCP connection to the server
+  5. Sends the message
+  6. Waits for the server's reply
+  7. Splits the reply by '|'
+  8. If "SUCCESS" → saves user to UserSession, opens MainDashboard, closes LoginForm
+  9. If "ERROR"   → shows error message to user
+[AFTER]   On success: MainDashboard is open, UserSession holds userId/username/isAdmin
+          On failure: user stays on LoginForm, sees error message
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE: ServerCore.cs (NetScoutServer)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+public void Start()
+{
+    _listener = new TcpListener(IPAddress.Any, 11111);
+    _listener.Start();
+    _isRunning = true;
+    Task.Run(() => AcceptClients());
+}
+
+private async Task AcceptClients()
+{
+    while (_isRunning)
+    {
+        var client = await _listener.AcceptTcpClientAsync();
+        _ = Task.Run(() => HandleClient(client));
+    }
+}
+
+[BEFORE]  AdminDashboard started, called serverCore.Start()
+[DOES]
+  1. Creates TCP listener on ALL network interfaces (0.0.0.0) port 11111
+  2. Starts listening (queues up to 10 pending connections by default)
+  3. Sets _isRunning = true
+  4. Starts an async loop on a background thread
+  5. Loop: waits for a client to connect (AcceptTcpClientAsync)
+  6. When client connects → spawns NEW background task to handle it
+  7. Goes back to waiting for next client immediately
+     (non-blocking — can handle many clients at the same time)
+[AFTER]   Server is live, accepting any number of client connections simultaneously
+          Each client handled in its own thread — they don't block each other
+
+private async Task HandleClient(TcpClient client)
+{
+    string message  = await reader.ReadLineAsync();
+    string[] parts  = message.Split('|');
+    string command  = parts[0];
+
+    switch (command)
+    {
+        case "LOGIN":    response = HandleLogin(parts[1], parts[2]);    break;
+        case "REGISTER": response = HandleRegister(parts[1..]);         break;
+        case "FORGOT_PASSWORD": HandleForgotPassword(parts[1]);         break;
+    }
+    await writer.WriteLineAsync(response);
+}
+
+[BEFORE]  A client connected and sent one line of text
+[DOES]
+  1. Reads the line from the TCP stream
+  2. Splits by '|' to get command and arguments
+  3. Routes to the correct handler based on command name
+  4. Handler queries the database and builds a response string
+  5. Writes the response back to the client
+  6. Logs the activity (hides password hashes in log)
+[AFTER]   Client receives the response, closes the connection
+          Event is fired to AdminDashboard to update the log panel
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE: DatabaseHelper.cs (NetScoutServer)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+public (bool success, int userId, string username, bool isAdmin)
+    ValidateUser(string email, string passwordHash)
+{
+    using var conn = new MySqlConnection(_connectionString);
+    conn.Open();
+    var cmd = new MySqlCommand(
+        "SELECT Id, Username, IsAdmin FROM Users WHERE Email=@e AND Password=@p",
+        conn);
+    cmd.Parameters.AddWithValue("@e", email);
+    cmd.Parameters.AddWithValue("@p", passwordHash);
+    using var reader = cmd.ExecuteReader();
+    if (reader.Read())
+        return (true, reader.GetInt32(0), reader.GetString(1), reader.GetBoolean(2));
+    return (false, 0, "", false);
+}
+
+[BEFORE]  Server received LOGIN command with email + password hash
+[DOES]
+  1. Opens a new MySQL connection
+  2. Builds a parameterized SQL query (safe against SQL injection)
+  3. Binds email and password hash as parameters
+  4. Executes SELECT — looks for a user matching BOTH email AND hash
+  5. If found → reads Id, Username, IsAdmin from the row
+  6. Returns (true, userId, username, isAdmin)
+  7. If not found → returns (false, 0, "", false)
+[AFTER]   ServerCore receives the tuple and builds SUCCESS or ERROR response
+          On success: LastLogin timestamp is also updated in the DB
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE: MainDashboard.cs — Ping Scan (NetScoutClient)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+private async Task RunPingScan(List<string> targets)
+{
+    var tasks = targets.Select(async ip =>
+    {
+        using var ping = new Ping();
+        var reply = await ping.SendPingAsync(ip, 1000);
+        return new {
+            IP     = ip,
+            Status = reply.Status == IPStatus.Success ? "Online" : "Offline",
+            Time   = reply.Status == IPStatus.Success ? reply.RoundtripTime + " ms" : "-",
+            TTL    = reply.Status == IPStatus.Success ? reply.Options?.Ttl.ToString() : "-"
+        };
+    });
+    var results = await Task.WhenAll(tasks);
+    // Add rows to DataGridView
+}
+
+[BEFORE]  User entered a target (IP / CIDR / range), clicked "Ping Scan"
+          Target was parsed into a List<string> of individual IPs
+[DOES]
+  1. Creates one async task per IP address
+  2. Each task: sends ICMP ping with 1000ms timeout
+  3. All pings run AT THE SAME TIME (parallel) — not one by one
+  4. Waits for ALL pings to finish (Task.WhenAll)
+  5. Each result: IP, Online/Offline, response time in ms, TTL value
+  6. Results added as rows to the DataGridView on screen
+[AFTER]   Grid shows all IPs with their online status
+          User can click any row to do a deeper port scan (right-click menu)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE: AdminDashboard.cs (NetScoutServer)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+private void btnDeleteUser_Click(object sender, EventArgs e)
+{
+    var selectedUser = GetSelectedUser();
+    if (selectedUser.Email == "admin@netscout.com")
+    {
+        MessageBox.Show("Cannot delete the default admin account.");
+        return;
+    }
+    if (MessageBox.Show($"Delete {selectedUser.Username}?", "Confirm",
+        MessageBoxButtons.YesNo) == DialogResult.Yes)
+    {
+        _db.DeleteUser(selectedUser.Id);
+        LoadUsers();
+    }
+}
+
+[BEFORE]  Admin selected a user row in the DataGridView, clicked Delete User
+[DOES]
+  1. Gets the selected user's data from the grid
+  2. Checks if it's the protected admin account — blocks deletion if so
+  3. Shows a YES/NO confirmation dialog to prevent accidental deletes
+  4. If confirmed → calls DatabaseHelper.DeleteUser(id)
+  5. DB deletes user — CASCADE removes their scan results, devices, ports too
+  6. Reloads the user grid to reflect the change
+[AFTER]   User is gone from the DB and from the grid
+          All related data (scans, devices, ports) also deleted (ON DELETE CASCADE)
+
+
+================================================================================

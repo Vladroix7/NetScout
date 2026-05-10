@@ -1,0 +1,106 @@
+================================================================================
+                        NETSCOUT — WHAT IS THIS PROJECT?
+================================================================================
+
+OVERVIEW
+--------
+NetScout is a Network Security Monitoring Tool.
+It lets a regular user scan their local network (find devices, open ports, OS)
+and an admin manage all users through a separate admin panel.
+
+The project has TWO separate Windows desktop applications:
+  - NetScoutClient  → what the user sees and uses (login, scan network)
+  - NetScoutServer  → what the admin runs (see users, manage accounts)
+
+Both talk to each other over TCP on port 11111.
+Both use one shared MySQL database (netscout).
+
+
+================================================================================
+                              PROJECT TREE
+================================================================================
+
+NetScout/
+│
+├── NetScout.sln                    ← Visual Studio solution file (links both projects)
+├── database.sql                    ← SQL script to set up all tables + default admin
+├── netscout.ico                    ← App icon (cyberpunk eye logo)
+├── README.md
+│
+├── NetScoutServer/                 ← ADMIN APP (WinForms)
+│   ├── Program.cs                  ← Starts the server login window
+│   ├── ServerLoginForm.cs/.Designer.cs   ← Admin login UI
+│   ├── AdminDashboard.cs/.Designer.cs    ← Main admin control panel
+│   ├── ServerCore.cs               ← TCP server (listens on port 11111)
+│   ├── DatabaseHelper.cs           ← All MySQL queries
+│   ├── ChangePasswordDialog.cs/.Designer.cs ← Change user password popup
+│   ├── ConnectedUser.cs            ← Holds data about a logged-in user (session)
+│   ├── UserRecord.cs               ← Data model for a user from the DB
+│   └── NetScoutServer.csproj       ← Project config (.NET 8, WinForms, MySql.Data)
+│
+├── NetScoutClient/                 ← USER APP (WinForms)
+│   ├── Program.cs                  ← Starts the login window
+│   ├── Config.cs                   ← Server IP, port, password hashing helper
+│   ├── UserSession.cs              ← Stores current user info after login
+│   ├── LoginForm.cs/.Designer.cs   ← Login UI
+│   ├── RegisterForm.cs/.Designer.cs← Register UI
+│   ├── ForgotPasswordDialog.cs/.Designer.cs ← Forgot password UI
+│   ├── MainDashboard.cs/.Designer.cs        ← Main scanning UI
+│   ├── PortDetailForm.cs/.Designer.cs       ← Deep port scan popup (ports 1-1024)
+│   └── NetScoutClient.csproj       ← Project config (.NET 8, WinForms)
+│
+└── docs/                           ← THIS FOLDER — project documentation
+    ├── 1_ABOUT.txt
+    ├── 2_HOW_AND_WHY.txt
+    ├── 3_CODE_WALKTHROUGH.txt
+    ├── 4_DESIGN_DECISIONS.txt
+    └── 5_WHAT_CAN_AND_CANNOT.txt
+
+
+================================================================================
+                              DATABASE TABLES (6)
+================================================================================
+
+Users
+  - Id, Email, Password (SHA-256 hash), Username, IsAdmin, CreatedDate, LastLogin
+
+ScanResults
+  - Id, UserId, TargetRange, ScanType, DeviceCount, ScanDate
+
+Devices
+  - Id, ScanResultId, IPAddress, MACAddress, Hostname, OS, ResponseTime
+
+OpenPorts
+  - Id, DeviceId, PortNumber, Protocol, ServiceName, Status
+
+SecurityIssues
+  - Id, DeviceId, IssueType, Description, Severity (Low/Medium/High/Critical)
+
+Settings
+  - Id, Key, Value
+
+
+================================================================================
+                              WHO DOES WHAT
+================================================================================
+
+ADMIN (NetScoutServer):
+  - Logs in with admin credentials
+  - Sees all registered users
+  - Can delete users (but NOT admin@netscout.com)
+  - Can make/remove admin status
+  - Can change any user's password
+  - Sees who is currently logged in (real-time)
+  - Sees all server events in a log panel
+  - Gets notified when a user asks to reset their password
+
+USER (NetScoutClient):
+  - Registers / Logs in
+  - Scans the network using 4 scan types:
+      1. Ping Scan      — finds who is alive on the network
+      2. Port Scan      — checks what ports/services are open
+      3. OS Detection   — guesses what OS each device runs
+      4. Aggressive     — all of the above combined
+  - Can request a password reset from the admin
+
+================================================================================

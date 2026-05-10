@@ -1,0 +1,1427 @@
+using System;
+using System.Windows.Forms;
+
+namespace NetScoutServer
+{
+    static class Program
+    {
+        [STAThread]
+        static void Main()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new ServerLoginForm());
+        }
+    }
+}
+using System;
+
+namespace NetScoutServer
+{
+    public class ConnectedUser
+    {
+        public int UserId { get; set; }
+        public string Email { get; set; }
+        public string Username { get; set; }
+        public bool IsAdmin { get; set; }
+        public DateTime LoginTime { get; set; }
+
+        public override string ToString() =>
+            $"● {Username}  ({Email})  {LoginTime:HH:mm:ss}";
+    }
+}
+using System;
+
+namespace NetScoutServer
+{
+    public class UserRecord
+    {
+        public int Id { get; set; }
+        public string Email { get; set; }
+        public string Username { get; set; }
+        public bool IsAdmin { get; set; }
+        public DateTime? LastLogin { get; set; }
+        public DateTime CreatedDate { get; set; }
+
+        public string LastLoginDisplay =>
+            LastLogin.HasValue ? LastLogin.Value.ToString("yyyy-MM-dd HH:mm") : "Never";
+
+        public string AdminDisplay => IsAdmin ? "✓" : "";
+    }
+}
+using System;
+using System.Collections.Generic;
+using MySql.Data.MySqlClient;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace NetScoutServer
+{
+    public class DatabaseHelper
+    {
+        private readonly string connectionString = "Server=localhost;Port=3306;Database=netscout;Uid=root;Pwd=123456;Allow User Variables=true;";
+
+        // ─────────────────────────────────────────────
+        //  CONNECTION
+        // ─────────────────────────────────────────────
+
+        public bool TestConnection()
+        {
+            try
+            {
+                using var conn = new MySqlConnection(connectionString);
+                conn.Open();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"DB connection failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>Ensures all required columns exist (safe to call on every start).</summary>
+        public void InitializeDatabase()
+        {
+            try
+            {
+                using var conn = new MySqlConnection(connectionString);
+                conn.Open();
+
+                var alters = new[]
+                {
+                    "ALTER TABLE Users ADD COLUMN IsAdmin     TINYINT  DEFAULT 0",
+                    "ALTER TABLE Users ADD COLUMN CreatedDate DATETIME DEFAULT CURRENT_TIMESTAMP",
+                    "ALTER TABLE Users ADD COLUMN LastLogin   DATETIME NULL"
+                };
+
+                // Error 1060 = duplicate column (already exists) — safe to ignore
+                foreach (var sql in alters)
+                    try { using (var cmd = new MySqlCommand(sql, conn)) cmd.ExecuteNonQuery(); }
+                    catch (MySqlException ex) when (ex.Number == 1060) { }
+
+                int count;
+                using (var cmd = new MySqlCommand("SELECT COUNT(*) FROM Users", conn))
+                    count = Convert.ToInt32(cmd.ExecuteScalar());
+
+                Console.WriteLine($"DB ready — {count} users");
+            }
+            catch (Exception ex) { Console.WriteLine($"DB init error: {ex.Message}"); }
+        }
+
+        // ─────────────────────────────────────────────
+        //  AUTH
+        // ─────────────────────────────────────────────
+
+        /// <summary>Returns "userId|username|isAdmin" on success, null on failure.</summary>
+        public string ValidateUserWithAdmin(string email, string password)
+        {
+            try
+            {
+                using var conn = new MySqlConnection(connectionString);
+                conn.Open();
+
+                const string sql = "SELECT Id, Username, Password, IsAdmin FROM Users WHERE Email = @e";
+                using var cmd = new MySqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@e", email);
+                using var r = cmd.ExecuteReader();
+
+                if (!r.Read()) return null;
+
+                string storedHash = r["Password"].ToString();
+                // Client already sends SHA-256 hash — compare directly
+                if (storedHash != password) return null;
+
+                int    id      = Convert.ToInt32(r["Id"]);
+                string uname   = r["Username"].ToString();
+                int    isAdmin = Convert.ToInt32(r["IsAdmin"]);
+                r.Close();
+
+                UpdateLastLogin(email);
+                return $"{id}|{uname}|{isAdmin}";
+            }
+            catch (Exception ex) { Console.WriteLine($"ValidateUser error: {ex.Message}"); return null; }
+        }
+
+        public bool EmailExists(string email)
+        {
+            if (string.IsNullOrWhiteSpace(email)) return false;
+            try
+            {
+                using var conn = new MySqlConnection(connectionString);
+                conn.Open();
+                using var cmd = new MySqlCommand("SELECT COUNT(*) FROM Users WHERE Email = @e", conn);
+                cmd.Parameters.AddWithValue("@e", email.ToLower().Trim());
+                return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
+            }
+            catch { return false; }
+        }
+
+        public bool RegisterUser(string email, string password, string username)
+        {
+            try
+            {
+                using var conn = new MySqlConnection(connectionString);
+                conn.Open();
+
+                using (var cmd = new MySqlCommand("SELECT COUNT(*) FROM Users WHERE Email = @e", conn))
+                {
+                    cmd.Parameters.AddWithValue("@e", email);
+                    if (Convert.ToInt32(cmd.ExecuteScalar()) > 0) return false;
+                }
+
+                const string sql = "INSERT INTO Users (Email, Password, Username, IsAdmin) VALUES (@e, @p, @u, 0)";
+                using (var cmd = new MySqlCommand(sql, conn))
+                {
+                    cmd.Parameters.AddWithValue("@e", email);
+                    cmd.Parameters.AddWithValue("@p", password); // client sends pre-hashed
+                    cmd.Parameters.AddWithValue("@u", username);
+                    return cmd.ExecuteNonQuery() > 0;
+                }
+            }
+            catch (Exception ex) { Console.WriteLine($"RegisterUser error: {ex.Message}"); return false; }
+        }
+
+        // ─────────────────────────────────────────────
+        //  ADMIN OPERATIONS
+        // ─────────────────────────────────────────────
+
+        public List<UserRecord> GetAllUsers()
+        {
+            var list = new List<UserRecord>();
+            using var conn = new MySqlConnection(connectionString);
+            conn.Open();
+
+            // Ensure optional columns exist before querying
+            // Error 1060 = duplicate column (already exists) — safe to ignore
+            foreach (var alter in new[]
+            {
+                "ALTER TABLE Users ADD COLUMN IsAdmin     TINYINT  DEFAULT 0",
+                "ALTER TABLE Users ADD COLUMN CreatedDate DATETIME DEFAULT CURRENT_TIMESTAMP",
+                "ALTER TABLE Users ADD COLUMN LastLogin   DATETIME NULL"
+            })
+            {
+                try { using var c = new MySqlCommand(alter, conn); c.ExecuteNonQuery(); }
+                catch (MySqlException ex) when (ex.Number == 1060) { }
+            }
+
+            const string sql = "SELECT Id, Email, Username, IsAdmin, LastLogin, CreatedDate FROM Users ORDER BY Id";
+            using var cmd = new MySqlCommand(sql, conn);
+            using var r   = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                list.Add(new UserRecord
+                {
+                    Id          = Convert.ToInt32(r["Id"]),
+                    Email       = r["Email"].ToString(),
+                    Username    = r["Username"].ToString(),
+                    IsAdmin     = r["IsAdmin"]     == DBNull.Value ? false      : Convert.ToInt32(r["IsAdmin"]) == 1,
+                    LastLogin   = r["LastLogin"]   == DBNull.Value ? (DateTime?)null : Convert.ToDateTime(r["LastLogin"]),
+                    CreatedDate = r["CreatedDate"] == DBNull.Value ? DateTime.Now    : Convert.ToDateTime(r["CreatedDate"])
+                });
+            }
+            return list;
+        }
+
+        public bool DeleteUser(int userId)
+        {
+            try
+            {
+                using var conn = new MySqlConnection(connectionString);
+                conn.Open();
+                using var cmd = new MySqlCommand("DELETE FROM Users WHERE Id = @id", conn);
+                cmd.Parameters.AddWithValue("@id", userId);
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex) { Console.WriteLine($"DeleteUser error: {ex.Message}"); return false; }
+        }
+
+        public bool SetAdminStatus(string email, bool isAdmin)
+        {
+            try
+            {
+                using var conn = new MySqlConnection(connectionString);
+                conn.Open();
+                using var cmd = new MySqlCommand("UPDATE Users SET IsAdmin = @a WHERE Email = @e", conn);
+                cmd.Parameters.AddWithValue("@a", isAdmin ? 1 : 0);
+                cmd.Parameters.AddWithValue("@e", email);
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex) { Console.WriteLine($"SetAdminStatus error: {ex.Message}"); return false; }
+        }
+
+        public bool ChangePassword(string email, string newPassword)
+        {
+            try
+            {
+                using var conn = new MySqlConnection(connectionString);
+                conn.Open();
+                using var cmd = new MySqlCommand("UPDATE Users SET Password = @p WHERE Email = @e", conn);
+                cmd.Parameters.AddWithValue("@p", HashPassword(newPassword));
+                cmd.Parameters.AddWithValue("@e", email);
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex) { Console.WriteLine($"ChangePassword error: {ex.Message}"); return false; }
+        }
+
+        // ─────────────────────────────────────────────
+        //  HELPERS
+        // ─────────────────────────────────────────────
+
+        public void UpdateLastLogin(string email)
+        {
+            try
+            {
+                using var conn = new MySqlConnection(connectionString);
+                conn.Open();
+                using var cmd = new MySqlCommand("UPDATE Users SET LastLogin = @t WHERE Email = @e", conn);
+                cmd.Parameters.AddWithValue("@t", DateTime.Now);
+                cmd.Parameters.AddWithValue("@e", email);
+                cmd.ExecuteNonQuery();
+            }
+            catch { }
+        }
+
+        public string HashPassword(string password)
+        {
+            using var sha = SHA256.Create();
+            byte[] bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(password));
+            var sb = new StringBuilder();
+            foreach (byte b in bytes) sb.Append(b.ToString("x2"));
+            return sb.ToString();
+        }
+    }
+}
+using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+
+namespace NetScoutServer
+{
+    public class ServerCore
+    {
+        private Socket _listener;
+        private readonly DatabaseHelper _db;
+        private bool _running;
+
+        private readonly List<ConnectedUser> _sessionLogins = new();
+        private readonly object _lock = new();
+        private int _totalConnections = 0;
+
+        public event Action<string> OnLog;
+        public event Action<ConnectedUser> OnUserLoggedIn;
+        public event Action<string> OnPasswordResetRequest;  // email
+
+        public ServerCore(DatabaseHelper db) => _db = db;
+
+        public void Start()
+        {
+            new Thread(RunServer) { IsBackground = true, Name = "TCPServer" }.Start();
+        }
+
+        public void Stop()
+        {
+            _running = false;
+            try { _listener?.Close(); } catch { }
+        }
+
+        public List<ConnectedUser> GetSessionLogins()
+        {
+            lock (_lock) return new List<ConnectedUser>(_sessionLogins);
+        }
+
+        private void RunServer()
+        {
+            try
+            {
+                _running = true;
+                _listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                _listener.Bind(new IPEndPoint(IPAddress.Any, 11111));
+                _listener.Listen(10);
+                Log("✅ Server started on 0.0.0.0:11111 (accepting all connections)");
+
+                while (_running)
+                {
+                    try
+                    {
+                        var client = _listener.Accept();
+                        int connId = System.Threading.Interlocked.Increment(ref _totalConnections);
+                        Log($"🔌 [{connId}] New connection from {client.RemoteEndPoint}");
+                        new Thread(() => HandleClient(client)) { IsBackground = true }.Start();
+                    }
+                    catch (SocketException) when (!_running) { break; }
+                }
+            }
+            catch (Exception ex) when (_running)
+            {
+                Log($"❌ Server error: {ex.Message}");
+            }
+        }
+
+        private void HandleClient(Socket sock)
+        {
+            try
+            {
+                byte[] buf = new byte[4096];
+                int n = sock.Receive(buf);
+                string data = Encoding.UTF8.GetString(buf, 0, n).Trim();
+                string[] parts = data.Split('|');
+
+                // Log safely — hide passwords from admin log
+                string safeLog = parts[0] switch
+                {
+                    "LOGIN"    => $"LOGIN|{parts[1]}|[HASH HIDDEN]",
+                    "REGISTER" => $"REGISTER|{parts[1]}|[HASH HIDDEN]|{(parts.Length > 3 ? parts[3] : "")}",
+                    _          => data
+                };
+                Log($"📨 {safeLog}");
+
+                string response = parts[0] switch
+                {
+                    "LOGIN"           => HandleLogin(parts),
+                    "REGISTER"        => HandleRegister(parts),
+                    "FORGOT_PASSWORD" => HandleForgotPassword(parts),
+                    _                 => "ERROR|Unknown command"
+                };
+
+                sock.Send(Encoding.UTF8.GetBytes(response));
+                sock.Close();
+                Log($"📤 {response}");
+            }
+            catch (Exception ex) { Log($"❌ Client error: {ex.Message}"); }
+        }
+
+        private string HandleLogin(string[] parts)
+        {
+            if (parts.Length < 3) return "ERROR|Invalid format";
+
+            string userData = _db.ValidateUserWithAdmin(parts[1], parts[2]);
+            if (userData == null)
+            {
+                Log($"❌ Login failed: {parts[1]}");
+                return "ERROR|Invalid email or password";
+            }
+
+            var d = userData.Split('|');
+            var user = new ConnectedUser
+            {
+                UserId    = int.Parse(d[0]),
+                Username  = d[1],
+                IsAdmin   = d[2] == "1",
+                Email     = parts[1],
+                LoginTime = DateTime.Now
+            };
+
+            lock (_lock) _sessionLogins.Add(user);
+            OnUserLoggedIn?.Invoke(user);
+            Log($"✅ Login: {parts[1]} [{(user.IsAdmin ? "ADMIN" : "USER")}]");
+            return $"SUCCESS|{userData}";
+        }
+
+        private string HandleRegister(string[] parts)
+        {
+            if (parts.Length < 4) return "ERROR|Invalid format";
+
+            if (_db.EmailExists(parts[1]))
+            {
+                Log($"❌ Register duplicate: {parts[1]}");
+                return "ERROR|Email already registered";
+            }
+
+            bool ok = _db.RegisterUser(parts[1], parts[2], parts[3]);
+            Log(ok ? $"✅ Registered: {parts[1]}" : $"❌ Registration failed");
+            return ok ? "SUCCESS|Registration complete" : "ERROR|Registration failed";
+        }
+
+        private string HandleForgotPassword(string[] parts)
+        {
+            if (parts.Length < 2) return "ERROR|Invalid format";
+
+            string email = parts[1].Trim();
+            if (!_db.EmailExists(email))
+            {
+                Log($"❌ Forgot password: email not found ({email})");
+                return "ERROR|No account found with that email address";
+            }
+
+            OnPasswordResetRequest?.Invoke(email);
+            Log($"🔔 Password reset requested for: {email}");
+            return "SUCCESS|Request sent to admin";
+        }
+
+        private void Log(string msg) => OnLog?.Invoke(msg);
+    }
+}
+using System;
+using System.Drawing;
+using System.Windows.Forms;
+
+namespace NetScoutServer
+{
+    public partial class ServerLoginForm : Form
+    {
+        private readonly DatabaseHelper _db = new DatabaseHelper();
+
+        public ServerLoginForm()
+        {
+            InitializeComponent();
+        }
+
+        private void ServerLoginForm_Load(object sender, EventArgs e)
+        {
+            txtEmail.Focus();
+        }
+
+        private void btnLogin_Click(object sender, EventArgs e)
+        {
+            string email    = txtEmail.Text.Trim();
+            string password = txtPassword.Text;
+
+            if (string.IsNullOrEmpty(email))
+            {
+                ShowError("Please enter your email.");
+                txtEmail.Focus();
+                return;
+            }
+
+            if (string.IsNullOrEmpty(password))
+            {
+                ShowError("Please enter your password.");
+                txtPassword.Focus();
+                return;
+            }
+
+            btnLogin.Enabled = false;
+            btnLogin.Text    = "Checking...";
+            this.Cursor      = Cursors.WaitCursor;
+            Application.DoEvents();
+
+            // Validate directly against DB (no TCP needed — server has direct DB access)
+            string userData = _db.ValidateUserWithAdmin(email, _db.HashPassword(password));
+
+            this.Cursor      = Cursors.Default;
+            btnLogin.Enabled = true;
+            btnLogin.Text    = "LOGIN";
+
+            if (userData == null)
+            {
+                ShowError("Invalid email or password.");
+                txtPassword.Clear();
+                txtPassword.Focus();
+                return;
+            }
+
+            string[] parts  = userData.Split('|');
+            bool     isAdmin = parts.Length > 2 && parts[2] == "1";
+
+            if (!isAdmin)
+            {
+                MessageBox.Show(
+                    "Access denied.\n\nThis application is for administrators only.\n\nPlease use the NetScout Client app.",
+                    "Admin Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                txtPassword.Clear();
+                txtPassword.Focus();
+                return;
+            }
+
+            // Admin confirmed — open dashboard
+            var dashboard = new AdminDashboard();
+            dashboard.Show();
+            this.Hide();
+
+            dashboard.FormClosed += (s, args) => Application.Exit();
+        }
+
+        private void txtPassword_KeyPress(object sender, KeyPressEventArgs e)
+        {
+            if (e.KeyChar == (char)Keys.Enter)
+            {
+                e.Handled = true;
+                btnLogin_Click(sender, e);
+            }
+        }
+
+        private void txtEmail_KeyPress(object sender, KeyPressEventArgs e)
+        {
+            if (e.KeyChar == (char)Keys.Enter)
+            {
+                e.Handled = true;
+                txtPassword.Focus();
+            }
+        }
+
+        private void ShowError(string msg) =>
+            MessageBox.Show(msg, "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+}
+using System.Drawing;
+using System.Windows.Forms;
+
+namespace NetScoutServer
+{
+    partial class ServerLoginForm
+    {
+        private System.ComponentModel.IContainer components = null;
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && components != null) components.Dispose();
+            base.Dispose(disposing);
+        }
+
+        private void InitializeComponent()
+        {
+            panelHeader  = new Panel();
+            lblTitle     = new Label();
+            lblSubtitle  = new Label();
+            lblEmail     = new Label();
+            txtEmail     = new TextBox();
+            lblPassword  = new Label();
+            txtPassword  = new TextBox();
+            btnLogin     = new Button();
+            lblNote      = new Label();
+
+            // ── Header ──────────────────────────────────────────────────
+            panelHeader.Dock      = DockStyle.Top;
+            panelHeader.Height    = 90;
+            panelHeader.BackColor = Color.FromArgb(42, 82, 82);
+
+            lblTitle.Text      = "NetScout";
+            lblTitle.Font      = new Font("Segoe UI", 22, FontStyle.Bold);
+            lblTitle.ForeColor = Color.White;
+            lblTitle.AutoSize  = true;
+            lblTitle.Location  = new Point(130, 12);
+
+            lblSubtitle.Text      = "Admin Server — Sign In";
+            lblSubtitle.Font      = new Font("Segoe UI", 10);
+            lblSubtitle.ForeColor = Color.FromArgb(180, 220, 210);
+            lblSubtitle.AutoSize  = true;
+            lblSubtitle.Location  = new Point(130, 52);
+
+            panelHeader.Controls.AddRange(new Control[] { lblTitle, lblSubtitle });
+
+            // ── Email ────────────────────────────────────────────────────
+            lblEmail.Text      = "Email Address:";
+            lblEmail.Font      = new Font("Segoe UI", 10);
+            lblEmail.ForeColor = Color.DarkSlateGray;
+            lblEmail.AutoSize  = true;
+            lblEmail.Location  = new Point(50, 120);
+
+            txtEmail.Font        = new Font("Segoe UI", 11);
+            txtEmail.Location    = new Point(50, 145);
+            txtEmail.Size        = new Size(350, 27);
+            txtEmail.BorderStyle = BorderStyle.FixedSingle;
+            txtEmail.KeyPress   += txtEmail_KeyPress;
+
+            // ── Password ─────────────────────────────────────────────────
+            lblPassword.Text      = "Password:";
+            lblPassword.Font      = new Font("Segoe UI", 10);
+            lblPassword.ForeColor = Color.DarkSlateGray;
+            lblPassword.AutoSize  = true;
+            lblPassword.Location  = new Point(50, 192);
+
+            txtPassword.Font         = new Font("Segoe UI", 11);
+            txtPassword.Location     = new Point(50, 217);
+            txtPassword.Size         = new Size(350, 27);
+            txtPassword.PasswordChar = '●';
+            txtPassword.BorderStyle  = BorderStyle.FixedSingle;
+            txtPassword.KeyPress    += txtPassword_KeyPress;
+
+            // ── Login Button ─────────────────────────────────────────────
+            btnLogin.Text      = "LOGIN";
+            btnLogin.Font      = new Font("Segoe UI", 12, FontStyle.Bold);
+            btnLogin.BackColor = Color.FromArgb(42, 82, 82);
+            btnLogin.ForeColor = Color.White;
+            btnLogin.FlatStyle = FlatStyle.Flat;
+            btnLogin.FlatAppearance.BorderSize = 0;
+            btnLogin.Size      = new Size(160, 42);
+            btnLogin.Location  = new Point(120, 270);
+            btnLogin.Cursor    = Cursors.Hand;
+            btnLogin.Click    += btnLogin_Click;
+
+            // ── Note ─────────────────────────────────────────────────────
+            lblNote.Text      = "🔒  Admin credentials required";
+            lblNote.Font      = new Font("Segoe UI", 9);
+            lblNote.ForeColor = Color.Gray;
+            lblNote.AutoSize  = true;
+            lblNote.Location  = new Point(115, 328);
+
+            // ── Form ─────────────────────────────────────────────────────
+            this.Text            = "NetScout — Admin Login";
+            this.ClientSize      = new Size(450, 370);
+            this.FormBorderStyle = FormBorderStyle.FixedSingle;
+            this.MaximizeBox     = false;
+            this.StartPosition   = FormStartPosition.CenterScreen;
+            this.BackColor       = Color.WhiteSmoke;
+            this.Load           += ServerLoginForm_Load;
+
+            this.Controls.AddRange(new Control[]
+            {
+                panelHeader, lblEmail, txtEmail,
+                lblPassword, txtPassword, btnLogin, lblNote
+            });
+        }
+
+        private Panel   panelHeader;
+        private Label   lblTitle;
+        private Label   lblSubtitle;
+        private Label   lblEmail;
+        private TextBox txtEmail;
+        private Label   lblPassword;
+        private TextBox txtPassword;
+        private Button  btnLogin;
+        private Label   lblNote;
+    }
+}
+using System;
+using System.Drawing;
+using System.Windows.Forms;
+
+namespace NetScoutServer
+{
+    public partial class AdminDashboard : Form
+    {
+        private readonly DatabaseHelper _db = new DatabaseHelper();
+        private ServerCore _server;
+
+        public AdminDashboard()
+        {
+            InitializeComponent();
+        }
+
+        // ─────────────────────────────────────────────
+        //  STARTUP
+        // ─────────────────────────────────────────────
+
+        private void AdminDashboard_Load(object sender, EventArgs e)
+        {
+            // Set splitter sizes/positions after form has real dimensions
+            splitMain.Panel1MinSize    = 180;
+            splitMain.Panel2MinSize    = 200;
+            splitMain.SplitterDistance = 210;
+
+            splitRight.Panel2MinSize    = 140;
+            splitRight.SplitterDistance = 420;
+
+            Log("🚀 NetScout Admin starting...");
+
+            if (!_db.TestConnection())
+            {
+                MessageBox.Show(
+                    "Cannot connect to MySQL!\n\n" +
+                    "Check:\n" +
+                    "  • MySQL Server is running\n" +
+                    "  • Database 'netscout' exists\n" +
+                    "  • Password in DatabaseHelper.cs is correct",
+                    "Database Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                SetStatus("● DB ERROR", Color.Crimson);
+            }
+            else
+            {
+                _db.InitializeDatabase();
+                EnsureDefaultAdmin();
+                LoadUsers();
+                Log("✅ Database connected");
+            }
+
+            StartServer();
+        }
+
+        private void EnsureDefaultAdmin()
+        {
+            // Only create if not already in DB — RegisterUser checks for duplicates
+            bool created = _db.RegisterUser("admin@netscout.com", "admin123", "Admin");
+            _db.SetAdminStatus("admin@netscout.com", true);
+            if (created) Log("✅ Default admin account created");
+        }
+
+        private void StartServer()
+        {
+            _server = new ServerCore(_db);
+            _server.OnLog                += msg => Log(msg);
+            _server.OnUserLoggedIn       += OnUserLoggedIn;
+            _server.OnPasswordResetRequest += OnPasswordResetRequest;
+            _server.Start();
+            SetStatus("● RUNNING", Color.LightGreen);
+        }
+
+        // ─────────────────────────────────────────────
+        //  SERVER EVENTS  (called from background threads)
+        // ─────────────────────────────────────────────
+
+        private void OnUserLoggedIn(ConnectedUser user)
+        {
+            if (InvokeRequired) { Invoke(() => OnUserLoggedIn(user)); return; }
+
+            lstOnline.Items.Insert(0, user.ToString());
+            lblOnlineCount.Text = $"Online: {lstOnline.Items.Count}";
+            this.Text = $"NetScout — Admin Server v1.0  [{lstOnline.Items.Count} online]";
+
+            // Refresh grid so LastLogin column updates
+            LoadUsers();
+        }
+
+        private void OnPasswordResetRequest(string email)
+        {
+            if (InvokeRequired) { Invoke(() => OnPasswordResetRequest(email)); return; }
+
+            // Avoid duplicate entries
+            if (!lstPwdRequests.Items.Contains(email))
+                lstPwdRequests.Items.Insert(0, email);
+
+            lblPwdCount.Text = $"Pending: {lstPwdRequests.Items.Count}";
+            Log($"🔔 Password reset request from: {email}");
+        }
+
+        // ─────────────────────────────────────────────
+        //  USER GRID
+        // ─────────────────────────────────────────────
+
+        private void LoadUsers()
+        {
+            if (dgvUsers.InvokeRequired) { Invoke(LoadUsers); return; }
+
+            try
+            {
+                var users = _db.GetAllUsers();
+                dgvUsers.Rows.Clear();
+
+                foreach (var u in users)
+                {
+                    int row = dgvUsers.Rows.Add(
+                        u.Id,
+                        u.Username,
+                        u.Email,
+                        u.AdminDisplay,
+                        u.LastLoginDisplay,
+                        u.CreatedDate.ToString("yyyy-MM-dd")
+                    );
+
+                    if (u.IsAdmin)
+                        dgvUsers.Rows[row].DefaultCellStyle.ForeColor = Color.DarkGoldenrod;
+                }
+
+                lblUserCount.Text = $"Total Users: {users.Count}";
+            }
+            catch (Exception ex)
+            {
+                Log($"❌ LoadUsers error: {ex.Message}");
+                lblUserCount.Text = "Total Users: ERROR";
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        //  BUTTON HANDLERS
+        // ─────────────────────────────────────────────
+
+        private void btnRefresh_Click(object sender, EventArgs e)
+        {
+            LoadUsers();
+            Log("🔄 User list refreshed");
+        }
+
+        private void btnDelete_Click(object sender, EventArgs e)
+        {
+            if (!GetSelectedUser(out int userId, out string username, out string email, out bool isAdmin))
+                return;
+
+            if (email == "admin@netscout.com")
+            {
+                MessageBox.Show("Cannot delete the main admin account.", "Protected",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var confirm = MessageBox.Show(
+                $"Delete user '{username}' ({email})?\nThis cannot be undone.",
+                "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+
+            if (confirm != DialogResult.Yes) return;
+
+            if (_db.DeleteUser(userId))
+            {
+                Log($"🗑️ Deleted user: {email}");
+                LoadUsers();
+            }
+            else
+            {
+                MessageBox.Show("Failed to delete user.\n\nIf the user has scan records, those must be deleted first.",
+                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void btnToggleAdmin_Click(object sender, EventArgs e)
+        {
+            if (!GetSelectedUser(out _, out string username, out string email, out bool isAdmin))
+                return;
+
+            if (email == "admin@netscout.com" && isAdmin)
+            {
+                MessageBox.Show("Cannot remove admin from the main admin account.", "Protected",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            bool newStatus = !isAdmin;
+            _db.SetAdminStatus(email, newStatus);
+            Log($"👤 {email} → admin: {(newStatus ? "YES" : "NO")}");
+            LoadUsers();
+        }
+
+        private void btnChangePassword_Click(object sender, EventArgs e)
+        {
+            if (!GetSelectedUser(out _, out string username, out string email, out _))
+                return;
+
+            using var dialog = new ChangePasswordDialog(username);
+            if (dialog.ShowDialog() == DialogResult.OK)
+            {
+                if (_db.ChangePassword(email, dialog.NewPassword))
+                {
+                    Log($"🔑 Password changed for: {email}");
+                    MessageBox.Show($"Password changed successfully for {username}.",
+                        "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MessageBox.Show("Failed to change password.", "Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void btnClearOnline_Click(object sender, EventArgs e)
+        {
+            lstOnline.Items.Clear();
+            lblOnlineCount.Text = "Online: 0";
+            this.Text = "NetScout — Admin Server v1.0";
+            Log("🧹 Online list cleared");
+        }
+
+        private void btnRespondPwd_Click(object sender, EventArgs e)
+        {
+            if (lstPwdRequests.SelectedItem == null)
+            {
+                MessageBox.Show("Select a password reset request from the list first.", "No Selection",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string email = lstPwdRequests.SelectedItem.ToString();
+
+            // Find username from DB
+            var users = _db.GetAllUsers();
+            var user  = users.Find(u => u.Email == email);
+            string displayName = user?.Username ?? email;
+
+            using var dialog = new ChangePasswordDialog(displayName);
+            if (dialog.ShowDialog() != DialogResult.OK) return;
+
+            if (_db.ChangePassword(email, dialog.NewPassword))
+            {
+                lstPwdRequests.Items.Remove(email);
+                lblPwdCount.Text = $"Pending: {lstPwdRequests.Items.Count}";
+                Log($"🔑 Password reset done for: {email}");
+                MessageBox.Show($"Password changed successfully for {displayName}.",
+                    "Done", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                MessageBox.Show("Failed to change password.", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        //  HELPERS
+        // ─────────────────────────────────────────────
+
+        private bool GetSelectedUser(out int id, out string username, out string email, out bool isAdmin)
+        {
+            id = 0; username = ""; email = ""; isAdmin = false;
+
+            if (dgvUsers.SelectedRows.Count == 0)
+            {
+                MessageBox.Show("Please select a user first.", "No Selection",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+
+            var row = dgvUsers.SelectedRows[0];
+            id       = Convert.ToInt32(row.Cells["colId"].Value);
+            username = row.Cells["colUsername"].Value.ToString();
+            email    = row.Cells["colEmail"].Value.ToString();
+            isAdmin  = row.Cells["colAdmin"].Value.ToString() == "✓";
+            return true;
+        }
+
+        private void Log(string message)
+        {
+            if (rtbLog.InvokeRequired) { rtbLog.Invoke(() => Log(message)); return; }
+
+            rtbLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\n");
+            rtbLog.ScrollToCaret();
+        }
+
+        private void SetStatus(string text, Color color)
+        {
+            if (lblStatus.InvokeRequired) { lblStatus.Invoke(() => SetStatus(text, color)); return; }
+            lblStatus.Text      = text;
+            lblStatus.ForeColor = color;
+        }
+
+        private void AdminDashboard_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            _server?.Stop();
+        }
+    }
+}
+using System.Drawing;
+using System.Windows.Forms;
+
+namespace NetScoutServer
+{
+    partial class AdminDashboard
+    {
+        private System.ComponentModel.IContainer components = null;
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && components != null) components.Dispose();
+            base.Dispose(disposing);
+        }
+
+        private void InitializeComponent()
+        {
+            // ── Controls ──────────────────────────────────────────────
+            panelHeader       = new Panel();
+            lblTitle          = new Label();
+            lblStatus         = new Label();
+
+            splitMain         = new SplitContainer();   // Left | Right
+            splitRight        = new SplitContainer();   // Top (grid) | Bottom (log)
+
+            panelOnline       = new Panel();
+            lblOnlineTitle    = new Label();
+            lblOnlineCount    = new Label();
+            lstOnline         = new ListBox();
+            btnClearOnline    = new Button();
+            lblPwdTitle       = new Label();
+            lblPwdCount       = new Label();
+            lstPwdRequests    = new ListBox();
+            btnRespondPwd     = new Button();
+
+            dgvUsers          = new DataGridView();
+            panelActions      = new Panel();
+            lblUserCount      = new Label();
+            btnRefresh        = new Button();
+            btnDelete         = new Button();
+            btnToggleAdmin    = new Button();
+            btnChangePassword = new Button();
+
+            rtbLog            = new RichTextBox();
+
+            // ── Header ────────────────────────────────────────────────
+            panelHeader.Dock      = DockStyle.Top;
+            panelHeader.Height    = 58;
+            panelHeader.BackColor = Color.DarkSlateGray;
+            panelHeader.Padding   = new Padding(12, 0, 12, 0);
+
+            lblTitle.Text      = "NetScout  —  Admin Server v1.0";
+            lblTitle.Font      = new Font("Segoe UI", 15, FontStyle.Bold);
+            lblTitle.ForeColor = Color.White;
+            lblTitle.AutoSize  = true;
+            lblTitle.Location  = new Point(12, 14);
+
+            lblStatus.Text      = "● INITIALIZING";
+            lblStatus.Font      = new Font("Segoe UI", 10, FontStyle.Bold);
+            lblStatus.ForeColor = Color.Yellow;
+            lblStatus.AutoSize  = true;
+            lblStatus.Anchor    = AnchorStyles.Top | AnchorStyles.Right;
+            lblStatus.Location  = new Point(820, 20);
+
+            panelHeader.Controls.Add(lblTitle);
+            panelHeader.Controls.Add(lblStatus);
+
+            // ── Split: Left (online users) | Right (grid + log) ──────
+            splitMain.Dock          = DockStyle.Fill;
+            splitMain.Orientation   = Orientation.Vertical;
+            splitMain.FixedPanel    = FixedPanel.Panel1;
+            splitMain.SplitterWidth = 2;
+
+            // ── Online Users Panel (left) ─────────────────────────────
+            panelOnline.Dock      = DockStyle.Fill;
+            panelOnline.BackColor = Color.FromArgb(245, 245, 245);
+            panelOnline.Padding   = new Padding(6);
+
+            lblOnlineTitle.Text      = "RECENTLY ONLINE";
+            lblOnlineTitle.Font      = new Font("Segoe UI", 8, FontStyle.Bold);
+            lblOnlineTitle.ForeColor = Color.DarkSlateGray;
+            lblOnlineTitle.AutoSize  = true;
+            lblOnlineTitle.Location  = new Point(6, 8);
+
+            lblOnlineCount.Text      = "Online: 0";
+            lblOnlineCount.Font      = new Font("Segoe UI", 8);
+            lblOnlineCount.ForeColor = Color.Gray;
+            lblOnlineCount.AutoSize  = true;
+            lblOnlineCount.Location  = new Point(6, 26);
+
+            lstOnline.Location    = new Point(6, 46);
+            lstOnline.Size        = new Size(196, 170);
+            lstOnline.Font        = new Font("Segoe UI", 8);
+            lstOnline.BorderStyle = BorderStyle.FixedSingle;
+            lstOnline.Anchor      = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            btnClearOnline.Text      = "Clear";
+            btnClearOnline.Font      = new Font("Segoe UI", 8);
+            btnClearOnline.FlatStyle = FlatStyle.Flat;
+            btnClearOnline.BackColor = Color.DarkSlateGray;
+            btnClearOnline.ForeColor = Color.White;
+            btnClearOnline.Size      = new Size(60, 22);
+            btnClearOnline.Anchor    = AnchorStyles.Top | AnchorStyles.Left;
+            btnClearOnline.Location  = new Point(6, 222);
+            btnClearOnline.Click    += btnClearOnline_Click;
+
+            // lblPwdTitle
+            lblPwdTitle.Text      = "PWD RESET REQUESTS";
+            lblPwdTitle.Font      = new Font("Segoe UI", 8, FontStyle.Bold);
+            lblPwdTitle.ForeColor = Color.Crimson;
+            lblPwdTitle.AutoSize  = true;
+            lblPwdTitle.Location  = new Point(6, 256);
+
+            // lblPwdCount
+            lblPwdCount.Text      = "Pending: 0";
+            lblPwdCount.Font      = new Font("Segoe UI", 8);
+            lblPwdCount.ForeColor = Color.Gray;
+            lblPwdCount.AutoSize  = true;
+            lblPwdCount.Location  = new Point(6, 274);
+
+            // lstPwdRequests
+            lstPwdRequests.Location    = new Point(6, 292);
+            lstPwdRequests.Size        = new Size(196, 150);
+            lstPwdRequests.Font        = new Font("Segoe UI", 8);
+            lstPwdRequests.BorderStyle = BorderStyle.FixedSingle;
+            lstPwdRequests.Anchor      = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            // btnRespondPwd
+            btnRespondPwd.Text      = "🔑 Reset Password";
+            btnRespondPwd.Font      = new Font("Segoe UI", 8, FontStyle.Bold);
+            btnRespondPwd.FlatStyle = FlatStyle.Flat;
+            btnRespondPwd.BackColor = Color.Crimson;
+            btnRespondPwd.ForeColor = Color.White;
+            btnRespondPwd.FlatAppearance.BorderSize = 0;
+            btnRespondPwd.Size      = new Size(196, 26);
+            btnRespondPwd.Anchor    = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            btnRespondPwd.Location  = new Point(6, 448);
+            btnRespondPwd.Cursor    = Cursors.Hand;
+            btnRespondPwd.Click    += btnRespondPwd_Click;
+
+            panelOnline.Controls.Add(lblOnlineTitle);
+            panelOnline.Controls.Add(lblOnlineCount);
+            panelOnline.Controls.Add(lstOnline);
+            panelOnline.Controls.Add(btnClearOnline);
+            panelOnline.Controls.Add(lblPwdTitle);
+            panelOnline.Controls.Add(lblPwdCount);
+            panelOnline.Controls.Add(lstPwdRequests);
+            panelOnline.Controls.Add(btnRespondPwd);
+            splitMain.Panel1.Controls.Add(panelOnline);
+
+            // ── Split Right: Users grid (top) | Log (bottom) ──────────
+            splitRight.Dock          = DockStyle.Fill;
+            splitRight.Orientation   = Orientation.Horizontal;
+            splitRight.SplitterWidth = 2;
+
+            // ── DataGridView ───────────────────────────────────────────
+            SetupDataGridView();
+            splitRight.Panel1.Controls.Add(dgvUsers);
+            splitRight.Panel1.Controls.Add(panelActions);
+
+            // ── Action Buttons ─────────────────────────────────────────
+            panelActions.Dock      = DockStyle.Bottom;
+            panelActions.Height    = 48;
+            panelActions.BackColor = Color.FromArgb(238, 238, 238);
+            panelActions.Padding   = new Padding(6, 8, 6, 6);
+
+            lblUserCount.Text      = "Total Users: 0";
+            lblUserCount.Font      = new Font("Segoe UI", 9);
+            lblUserCount.ForeColor = Color.DarkSlateGray;
+            lblUserCount.AutoSize  = true;
+            lblUserCount.Location  = new Point(8, 15);
+
+            StyleButton(btnRefresh,        "⟳  Refresh",         Color.SteelBlue,     90,  6);
+            StyleButton(btnDelete,         "🗑  Delete User",     Color.Crimson,      222,  6);
+            StyleButton(btnToggleAdmin,    "★  Toggle Admin",     Color.DarkSlateGray, 354,  6);
+            StyleButton(btnChangePassword, "🔑  Change Password", Color.DimGray,       486,  6);
+
+            btnRefresh.Click        += btnRefresh_Click;
+            btnDelete.Click         += btnDelete_Click;
+            btnToggleAdmin.Click    += btnToggleAdmin_Click;
+            btnChangePassword.Click += btnChangePassword_Click;
+
+            panelActions.Controls.Add(lblUserCount);
+            panelActions.Controls.Add(btnRefresh);
+            panelActions.Controls.Add(btnDelete);
+            panelActions.Controls.Add(btnToggleAdmin);
+            panelActions.Controls.Add(btnChangePassword);
+
+            // ── Log ────────────────────────────────────────────────────
+            rtbLog.Dock        = DockStyle.Fill;
+            rtbLog.BackColor   = Color.FromArgb(20, 20, 20);
+            rtbLog.ForeColor   = Color.LightGreen;
+            rtbLog.Font        = new Font("Consolas", 9);
+            rtbLog.ReadOnly    = true;
+            rtbLog.BorderStyle = BorderStyle.None;
+            rtbLog.ScrollBars  = RichTextBoxScrollBars.Vertical;
+            splitRight.Panel2.Controls.Add(rtbLog);
+
+            splitMain.Panel2.Controls.Add(splitRight);
+
+            // ── Form ───────────────────────────────────────────────────
+            this.Text            = "NetScout Admin";
+            this.Size            = new Size(1050, 700);
+            this.MinimumSize     = new Size(900, 580);
+            this.StartPosition   = FormStartPosition.CenterScreen;
+            this.BackColor       = Color.WhiteSmoke;
+            this.Load           += AdminDashboard_Load;
+            this.FormClosing    += AdminDashboard_FormClosing;
+
+            this.Controls.Add(splitMain);
+            this.Controls.Add(panelHeader);
+        }
+
+        private void SetupDataGridView()
+        {
+            dgvUsers.Dock                    = DockStyle.Fill;
+            dgvUsers.ReadOnly                = true;
+            dgvUsers.SelectionMode           = DataGridViewSelectionMode.FullRowSelect;
+            dgvUsers.MultiSelect             = false;
+            dgvUsers.AllowUserToAddRows      = false;
+            dgvUsers.AllowUserToDeleteRows   = false;
+            dgvUsers.AllowUserToResizeRows   = false;
+            dgvUsers.RowHeadersVisible       = false;
+            dgvUsers.AutoSizeColumnsMode     = DataGridViewAutoSizeColumnsMode.Fill;
+            dgvUsers.BorderStyle             = BorderStyle.None;
+            dgvUsers.BackgroundColor         = Color.White;
+            dgvUsers.GridColor               = Color.FromArgb(220, 220, 220);
+            dgvUsers.EnableHeadersVisualStyles = false;
+
+            // Header style
+            dgvUsers.ColumnHeadersDefaultCellStyle.BackColor = Color.DarkSlateGray;
+            dgvUsers.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
+            dgvUsers.ColumnHeadersDefaultCellStyle.Font      = new Font("Segoe UI", 9, FontStyle.Bold);
+            dgvUsers.ColumnHeadersHeight = 30;
+
+            // Row style
+            dgvUsers.DefaultCellStyle.Font = new Font("Segoe UI", 9);
+            dgvUsers.DefaultCellStyle.SelectionBackColor = Color.SteelBlue;
+            dgvUsers.DefaultCellStyle.SelectionForeColor = Color.White;
+            dgvUsers.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(248, 250, 253);
+            dgvUsers.RowTemplate.Height = 26;
+
+            // Columns
+            dgvUsers.Columns.Add(new DataGridViewTextBoxColumn { Name = "colId",       HeaderText = "ID",          Width = 45,  FillWeight = 5  });
+            dgvUsers.Columns.Add(new DataGridViewTextBoxColumn { Name = "colUsername",  HeaderText = "Username",    Width = 120, FillWeight = 15 });
+            dgvUsers.Columns.Add(new DataGridViewTextBoxColumn { Name = "colEmail",     HeaderText = "Email",       Width = 220, FillWeight = 30 });
+            dgvUsers.Columns.Add(new DataGridViewTextBoxColumn { Name = "colAdmin",     HeaderText = "Admin",       Width = 55,  FillWeight = 7  });
+            dgvUsers.Columns.Add(new DataGridViewTextBoxColumn { Name = "colLastLogin", HeaderText = "Last Login",  Width = 140, FillWeight = 20 });
+            dgvUsers.Columns.Add(new DataGridViewTextBoxColumn { Name = "colCreated",   HeaderText = "Created",     Width = 100, FillWeight = 13 });
+
+            dgvUsers.Columns["colAdmin"].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            dgvUsers.Columns["colAdmin"].DefaultCellStyle.ForeColor = Color.DarkGoldenrod;
+            dgvUsers.Columns["colAdmin"].DefaultCellStyle.Font      = new Font("Segoe UI", 11, FontStyle.Bold);
+            dgvUsers.Columns["colId"].DefaultCellStyle.ForeColor    = Color.Gray;
+        }
+
+        private void StyleButton(Button btn, string text, Color bg, int x, int y)
+        {
+            btn.Text      = text;
+            btn.BackColor = bg;
+            btn.ForeColor = Color.White;
+            btn.FlatStyle = FlatStyle.Flat;
+            btn.FlatAppearance.BorderSize = 0;
+            btn.Font      = new Font("Segoe UI", 9, FontStyle.Bold);
+            btn.Cursor    = Cursors.Hand;
+            btn.Size      = new Size(120, 30);
+            btn.Location  = new Point(x, y);
+        }
+
+        // ── Fields ────────────────────────────────────────────────────
+        private Panel         panelHeader;
+        private Label         lblTitle;
+        private Label         lblStatus;
+        private SplitContainer splitMain;
+        private SplitContainer splitRight;
+        private Panel         panelOnline;
+        private Label         lblOnlineTitle;
+        private Label         lblOnlineCount;
+        private ListBox       lstOnline;
+        private Button        btnClearOnline;
+        private Label         lblPwdTitle;
+        private Label         lblPwdCount;
+        private ListBox       lstPwdRequests;
+        private Button        btnRespondPwd;
+        private DataGridView  dgvUsers;
+        private Panel         panelActions;
+        private Label         lblUserCount;
+        private Button        btnRefresh;
+        private Button        btnDelete;
+        private Button        btnToggleAdmin;
+        private Button        btnChangePassword;
+        private RichTextBox   rtbLog;
+    }
+}
+using System;
+using System.Windows.Forms;
+
+namespace NetScoutServer
+{
+    public partial class ChangePasswordDialog : Form
+    {
+        public string NewPassword => txtPassword.Text;
+
+        public ChangePasswordDialog(string username)
+        {
+            InitializeComponent();
+            lblInfo.Text = $"Change password for:  {username}";
+        }
+
+        private void btnOK_Click(object sender, EventArgs e)
+        {
+            if (txtPassword.Text.Length < 6)
+            {
+                MessageBox.Show("Password must be at least 6 characters.", "Validation",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                txtPassword.Focus();
+                return;
+            }
+
+            if (txtPassword.Text != txtConfirm.Text)
+            {
+                MessageBox.Show("Passwords do not match.", "Validation",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                txtConfirm.Focus();
+                return;
+            }
+
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        private void btnCancel_Click(object sender, EventArgs e)
+        {
+            DialogResult = DialogResult.Cancel;
+            Close();
+        }
+    }
+}
+using System.Drawing;
+using System.Windows.Forms;
+
+namespace NetScoutServer
+{
+    partial class ChangePasswordDialog
+    {
+        private System.ComponentModel.IContainer components = null;
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && components != null) components.Dispose();
+            base.Dispose(disposing);
+        }
+
+        private void InitializeComponent()
+        {
+            lblInfo    = new Label();
+            lblPwd     = new Label();
+            txtPassword = new TextBox();
+            lblConfirm = new Label();
+            txtConfirm = new TextBox();
+            btnOK      = new Button();
+            btnCancel  = new Button();
+
+            // lblInfo
+            lblInfo.AutoSize  = true;
+            lblInfo.Font      = new Font("Segoe UI", 10, FontStyle.Bold);
+            lblInfo.ForeColor = Color.DarkSlateGray;
+            lblInfo.Location  = new Point(20, 20);
+
+            // lblPwd
+            lblPwd.Text      = "New Password:";
+            lblPwd.AutoSize  = true;
+            lblPwd.Font      = new Font("Segoe UI", 9);
+            lblPwd.Location  = new Point(20, 60);
+
+            // txtPassword
+            txtPassword.Location     = new Point(20, 80);
+            txtPassword.Size         = new Size(310, 27);
+            txtPassword.Font         = new Font("Segoe UI", 10);
+            txtPassword.PasswordChar = '●';
+
+            // lblConfirm
+            lblConfirm.Text     = "Confirm Password:";
+            lblConfirm.AutoSize = true;
+            lblConfirm.Font     = new Font("Segoe UI", 9);
+            lblConfirm.Location = new Point(20, 120);
+
+            // txtConfirm
+            txtConfirm.Location     = new Point(20, 140);
+            txtConfirm.Size         = new Size(310, 27);
+            txtConfirm.Font         = new Font("Segoe UI", 10);
+            txtConfirm.PasswordChar = '●';
+
+            // btnOK
+            btnOK.Text            = "Change Password";
+            btnOK.BackColor       = Color.DarkSlateGray;
+            btnOK.ForeColor       = Color.White;
+            btnOK.FlatStyle       = FlatStyle.Flat;
+            btnOK.FlatAppearance.BorderSize = 0;
+            btnOK.Font            = new Font("Segoe UI", 9, FontStyle.Bold);
+            btnOK.Location        = new Point(20, 190);
+            btnOK.Size            = new Size(150, 32);
+            btnOK.Cursor          = Cursors.Hand;
+            btnOK.Click          += btnOK_Click;
+
+            // btnCancel
+            btnCancel.Text      = "Cancel";
+            btnCancel.BackColor = Color.Gray;
+            btnCancel.ForeColor = Color.White;
+            btnCancel.FlatStyle = FlatStyle.Flat;
+            btnCancel.FlatAppearance.BorderSize = 0;
+            btnCancel.Font      = new Font("Segoe UI", 9);
+            btnCancel.Location  = new Point(180, 190);
+            btnCancel.Size      = new Size(80, 32);
+            btnCancel.Cursor    = Cursors.Hand;
+            btnCancel.Click    += btnCancel_Click;
+
+            // Form
+            this.Text            = "Change Password";
+            this.ClientSize      = new Size(350, 245);
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox     = false;
+            this.MinimizeBox     = false;
+            this.StartPosition   = FormStartPosition.CenterParent;
+            this.BackColor       = Color.WhiteSmoke;
+            this.AcceptButton    = btnOK;
+            this.CancelButton    = btnCancel;
+
+            this.Controls.Add(lblInfo);
+            this.Controls.Add(lblPwd);
+            this.Controls.Add(txtPassword);
+            this.Controls.Add(lblConfirm);
+            this.Controls.Add(txtConfirm);
+            this.Controls.Add(btnOK);
+            this.Controls.Add(btnCancel);
+        }
+
+        private Label   lblInfo;
+        private Label   lblPwd;
+        private TextBox txtPassword;
+        private Label   lblConfirm;
+        private TextBox txtConfirm;
+        private Button  btnOK;
+        private Button  btnCancel;
+    }
+}

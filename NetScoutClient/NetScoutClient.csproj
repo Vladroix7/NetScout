@@ -5,5 +5,6 @@
     <RootNamespace>NetScoutClient</RootNamespace>
     <AssemblyName>NetScoutClient</AssemblyName>
     <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>..\netscout.ico</ApplicationIcon>
   </PropertyGroup>
 </Project>

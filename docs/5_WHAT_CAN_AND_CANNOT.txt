@@ -1,0 +1,104 @@
+================================================================================
+              NETSCOUT — WHAT THE CODE CAN AND CANNOT DO
+================================================================================
+
+
+✅ WHAT IT CAN DO (Phase 1 — Done)
+================================================================================
+
+AUTHENTICATION
+  ✅ User registration with email + password (SHA-256 hashed)
+  ✅ User login — verified against DB through TCP server
+  ✅ Admin login — separate login form, checks IsAdmin=1 in DB
+  ✅ Password hashing happens client-side (plain text never transmitted)
+  ✅ "Forgot password" request sent to admin
+
+ADMIN PANEL
+  ✅ View all registered users in a table (ID, name, email, admin, dates)
+  ✅ Delete a user (and all their data via CASCADE)
+  ✅ Toggle admin status for any user
+  ✅ Change any user's password from the admin panel
+  ✅ See which users are currently logged in (live session list)
+  ✅ See all server events in a real-time log
+  ✅ Default admin account (admin@netscout.com) is protected from deletion/demotion
+  ✅ Password reset requests from users appear in admin panel
+
+NETWORK SCANNING
+  ✅ Ping Scan: finds alive hosts, shows IP / status / response time / TTL
+  ✅ Port Scan: checks 13 common ports per host (FTP, SSH, HTTP, RDP, etc.)
+  ✅ OS Detection: estimates OS from TTL value
+  ✅ Aggressive Scan: ping + OS + 7 top ports in one pass
+  ✅ Port Detail Scan: scans all 1024 ports on a single target
+  ✅ Target input: single IP, CIDR notation, or IP range
+  ✅ All scans run concurrently (async) — UI never freezes
+
+GENERAL
+  ✅ Custom app icon (cyberpunk eye logo)
+  ✅ Desktop shortcuts for both apps
+  ✅ Dark theme UI (DarkSlateGray / SteelBlue)
+  ✅ Real-time progress bar during scanning
+  ✅ Right-click context menu on scan results
+  ✅ 6-table MySQL database with proper relationships
+
+
+❌ WHAT IT CANNOT DO (Phase 2 — Not Yet Built)
+================================================================================
+
+SCANNING LIMITATIONS
+  ❌ Does NOT save scan results to the database
+      (ScanResults, Devices, OpenPorts tables exist but nothing writes to them)
+  ❌ No scan history — results disappear when window closes
+  ❌ Cannot export results to CSV, PDF, or Excel
+  ❌ OS detection is a guess based on TTL only — not real fingerprinting
+      (real tools like Nmap send special crafted packets, analyze dozens of signals)
+  ❌ Cannot detect MAC addresses on remote subnets (only same LAN via ARP)
+  ❌ No vulnerability scanning (SecurityIssues table is empty — not used yet)
+  ❌ No service version detection (just knows port is open, not what version)
+  ❌ No scheduled/automatic scans
+  ❌ Port scan timeout is fixed 500ms — may miss slow devices
+
+SECURITY LIMITATIONS
+  ❌ No TLS/SSL encryption on the TCP channel
+      (messages travel in plain text — readable by network sniffer on LAN)
+  ❌ No password salting — same password always = same hash
+      (rainbow table attack possible if DB is compromised)
+  ❌ No brute-force protection (no lockout after X failed logins)
+  ❌ No session tokens — if someone guesses userId they could fake a session
+  ❌ No HTTPS — server has no certificate
+
+COMMUNICATION LIMITATIONS
+  ❌ Admin cannot send chat messages to users (CHAT command not built yet)
+  ❌ User cannot initiate chat with admin
+  ❌ No push notifications to client (server cannot reach out to client — only client initiates)
+  ❌ No SCAN command handled on server side (scanning happens 100% in client)
+
+ADMIN LIMITATIONS
+  ❌ Admin cannot view scan results per user
+  ❌ No user search/filter in the admin grid
+  ❌ No pagination for large user lists
+  ❌ Cannot ban/suspend a user (only delete)
+  ❌ No audit log stored in DB (log panel only, not persisted)
+
+GENERAL
+  ❌ No installer/setup wizard
+  ❌ No auto-update mechanism
+  ❌ Only works on Windows (WinForms = Windows only)
+  ❌ Server IP is hardcoded in Config.cs (127.0.0.1) — must change for remote server
+  ❌ No ICMP support on some machines without admin privileges
+      (ping scan may fail if app is not run as Administrator)
+  ❌ No IPv6 support — only IPv4
+
+
+PHASE 2 ROADMAP (What Should Be Built Next)
+================================================================================
+  1. Save scan results to DB (ScanResults + Devices + OpenPorts tables)
+  2. SCAN command on server: client sends scan data, server stores it
+  3. CHAT command: admin ↔ user messaging panel
+  4. Password reset workflow: user requests → admin approves → sends new password
+  5. Export scan results (CSV)
+  6. TLS encryption on TCP channel
+  7. Password salting (BCrypt)
+  8. Login attempt rate limiting
+
+
+================================================================================

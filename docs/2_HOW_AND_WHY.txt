@@ -1,0 +1,182 @@
+================================================================================
+                     NETSCOUT — HOW IT WORKS + WHY BUILT THIS WAY
+================================================================================
+
+
+HOW THE TWO APPS TALK TO EACH OTHER
+-------------------------------------
+Client sends a text message → Server reads it → Server replies → Client reads reply.
+
+Message format:
+  COMMAND|value1|value2|...
+
+Examples:
+  LOGIN|admin@netscout.com|5e884898da...   (SHA-256 hash of password)
+  REGISTER|user@test.com|5e884898da...|John
+  FORGOT_PASSWORD|user@test.com
+
+Server replies:
+  SUCCESS|1|John|False     (login ok: userId=1, username=John, isAdmin=False)
+  ERROR|Invalid credentials
+
+Each request is a NEW TCP connection. The client:
+  1. Opens connection to 127.0.0.1:11111
+  2. Sends one line
+  3. Reads one line back
+  4. Closes connection
+
+
+================================================================================
+                      WHY TCP AND NOT SOMETHING ELSE?
+================================================================================
+
+TCP was chosen over:
+
+  WebSockets  → overkill for a desktop app, needs a web server layer
+  HTTP/REST   → extra overhead, needs an HTTP server (IIS, Kestrel etc.)
+  UDP         → not guaranteed delivery, bad for auth/login messages
+  Named Pipes → only works on same machine, not network-compatible
+  gRPC        → too complex for a small internal tool
+
+TCP is:
+  - Simple to code in C# with TcpClient/TcpListener
+  - Reliable (guarantees delivery)
+  - Fast for local network use
+  - No external libraries needed
+  - Works on any machine on the same network
+
+
+================================================================================
+                      WHY MYSQL AND NOT FIREBASE / SQLITE / MSSQL?
+================================================================================
+
+Firebase was rejected because:
+  - Requires internet connection / Google account
+  - Data goes to the cloud (bad for a security tool — you want local data)
+  - Adds dependency on a 3rd party service
+  - Not suitable for offline/local network tools
+
+SQLite was rejected because:
+  - Single-file DB, not great for concurrent access from two apps
+  - No user management, no remote connections
+  - Harder to inspect/manage with tools
+
+MSSQL (SQL Server) was rejected because:
+  - Requires Windows Server license for production
+  - Heavier to install and configure
+  - Overkill for this project size
+
+MySQL 8.0 was chosen because:
+  - Free and open source
+  - Easy to install locally (XAMPP, standalone)
+  - Excellent C# support via MySql.Data NuGet package
+  - Familiar SQL syntax
+  - Handles concurrent connections well
+  - Good admin tools (MySQL Workbench, phpMyAdmin)
+  - All data stays LOCAL — important for a security/network tool
+
+
+================================================================================
+                      WHY TWO SEPARATE APPS AND NOT ONE?
+================================================================================
+
+Separation of concerns:
+  - Users should NOT have access to admin functions
+  - Admin app can run on a dedicated machine
+  - Easier to develop, test, and maintain independently
+  - The server EXE is never distributed to users
+  - Security: client has no MySQL credentials at all
+
+The client does NOT connect directly to MySQL.
+All DB operations go through the server.
+This means:
+  - DB password never exposed to clients
+  - Admin controls the only DB access point
+  - Even if someone decompiles the client, they see no DB credentials
+
+
+================================================================================
+                      WHY SHA-256 HASHING ON THE CLIENT SIDE?
+================================================================================
+
+Password is hashed BEFORE it is sent over TCP.
+
+Flow:
+  User types "admin123"
+     ↓ (Config.HashPassword)
+  "240be518..." (SHA-256 hash)
+     ↓ (sent over TCP)
+  Server stores/compares this hash
+
+Why client-side?
+  - Plain text password NEVER travels over the network
+  - Even if someone sniffs the TCP traffic, they only see a hash
+  - Server stores the same hash format — no double-hashing needed
+
+Limitation: no salt is used (see 5_WHAT_CAN_AND_CANNOT.txt)
+
+
+================================================================================
+                      WHY WINFORMS AND NOT WPF OR WEB APP?
+================================================================================
+
+WPF rejected because:
+  - More complex XAML/binding system
+  - Steeper learning curve
+  - Harder to do quick DataGridView-style tables
+
+Web app (ASP.NET Blazor etc.) rejected because:
+  - Overkill for a local desktop tool
+  - Would need a browser or web server
+  - More files, more complexity
+
+WinForms chosen because:
+  - Fast to build UI with drag-and-drop designer
+  - Native Windows look
+  - Simple event-driven model (button click → function)
+  - DataGridView is perfect for user tables and scan results
+  - Works great for .NET 6/8 desktop apps
+
+
+================================================================================
+                      HOW THE SCANNING WORKS
+================================================================================
+
+1. PING SCAN
+   - Sends ICMP echo request to each IP in the range
+   - Uses System.Net.NetworkInformation.Ping class
+   - If reply comes back → host is alive
+   - Records: IP, status (Online/Offline), response time (ms), TTL
+
+2. PORT SCAN
+   - For each alive host, tries to connect to 13 common ports:
+     21(FTP), 22(SSH), 23(Telnet), 25(SMTP), 53(DNS), 80(HTTP),
+     110(POP3), 143(IMAP), 443(HTTPS), 3306(MySQL), 3389(RDP),
+     5900(VNC), 8080(HTTP-alt)
+   - Uses TcpClient with a short timeout (500ms)
+   - Open = connection succeeded, Closed = connection refused/timeout
+
+3. OS DETECTION
+   - Based on TTL value from ping reply:
+     TTL 128      → Windows
+     TTL 64       → Linux or macOS
+     TTL 255      → Cisco/network device
+     Other        → Unknown
+   - This is an approximation — not 100% accurate
+
+4. AGGRESSIVE SCAN
+   - Combines: Ping + OS Detection + top 7 ports
+   - Single pass, all data returned together
+
+5. PORT DETAIL FORM
+   - Scans ALL ports 1-1024 on a single target
+   - Uses SemaphoreSlim(100) to limit to 100 parallel connections
+   - Much slower but more thorough than port scan
+
+HOW IPs ARE PARSED:
+  Single IP:   "192.168.1.1"          → scans just that one
+  CIDR:        "192.168.1.0/24"       → scans 192.168.1.0 to 192.168.1.255 (256 IPs)
+  Range:       "192.168.1.1-254"      → scans 192.168.1.1 to 192.168.1.254
+
+
+================================================================================

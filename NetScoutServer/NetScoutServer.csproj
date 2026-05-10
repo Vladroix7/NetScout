@@ -5,6 +5,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>NetScoutServer</RootNamespace>
     <AssemblyName>NetScoutServer</AssemblyName>
+    <ApplicationIcon>..\netscout.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="MySql.Data" Version="8.2.0" />

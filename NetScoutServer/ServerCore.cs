@@ -71,19 +71,26 @@ namespace NetScoutServer
         {
             try
             {
+                // Receive raw bytes from client
                 byte[] buf = new byte[4096];
                 int n = sock.Receive(buf);
-                string data = Encoding.UTF8.GetString(buf, 0, n).Trim();
+                string raw = Encoding.UTF8.GetString(buf, 0, n).Trim();
+
+                // Decrypt the packet — client always sends AES-256 encrypted Base64
+                string data;
+                try   { data = SecurityHelper.Decrypt(raw); }
+                catch { Log("❌ Decryption failed — client may be using old version"); sock.Close(); return; }
+
                 string[] parts = data.Split('|');
 
-                // Log safely — hide passwords from admin log
+                // Log safely — hide passwords and hash from admin log
                 string safeLog = parts[0] switch
                 {
                     "LOGIN"    => $"LOGIN|{parts[1]}|[HASH HIDDEN]",
                     "REGISTER" => $"REGISTER|{parts[1]}|[HASH HIDDEN]|{(parts.Length > 3 ? parts[3] : "")}",
                     _          => data
                 };
-                Log($"📨 {safeLog}");
+                Log($"📨 [ENC] {safeLog}");
 
                 string response = parts[0] switch
                 {
@@ -93,9 +100,11 @@ namespace NetScoutServer
                     _                 => "ERROR|Unknown command"
                 };
 
-                sock.Send(Encoding.UTF8.GetBytes(response));
+                // Encrypt the response before sending back
+                string encryptedResponse = SecurityHelper.Encrypt(response);
+                sock.Send(Encoding.UTF8.GetBytes(encryptedResponse));
                 sock.Close();
-                Log($"📤 {response}");
+                Log($"📤 [ENC] {response}");
             }
             catch (Exception ex) { Log($"❌ Client error: {ex.Message}"); }
         }

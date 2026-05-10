@@ -81,17 +81,22 @@ namespace NetScoutClient
                 using (TcpClient client = new TcpClient())
                 {
                     client.ReceiveTimeout = Config.ConnectionTimeout;
-                    client.SendTimeout = Config.ConnectionTimeout;
+                    client.SendTimeout    = Config.ConnectionTimeout;
                     client.Connect(Config.ServerIP, Config.ServerPort);
 
                     NetworkStream stream = client.GetStream();
-                    string message = $"REGISTER|{email}|{Config.HashPassword(password)}|{username}";
-                    byte[] data = Encoding.UTF8.GetBytes(message);
+
+                    // Encrypt the full message — Wireshark sees only Base64 ciphertext
+                    string plain   = $"REGISTER|{email}|{Config.HashPassword(password)}|{username}";
+                    string encoded = SecurityHelper.Encrypt(plain);
+                    byte[] data    = Encoding.UTF8.GetBytes(encoded);
                     stream.Write(data, 0, data.Length);
 
-                    byte[] buffer = new byte[1024];
-                    int bytes = stream.Read(buffer, 0, buffer.Length);
-                    return Encoding.UTF8.GetString(buffer, 0, bytes);
+                    // Read and decrypt server response
+                    byte[] buffer = new byte[4096];
+                    int bytes     = stream.Read(buffer, 0, buffer.Length);
+                    string raw    = Encoding.UTF8.GetString(buffer, 0, bytes);
+                    return SecurityHelper.Decrypt(raw);
                 }
             }
             catch (SocketException)
